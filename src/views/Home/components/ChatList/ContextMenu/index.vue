@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, type PropType, inject } from 'vue'
+import { ElMessage } from 'element-plus'
 import apis from '@/services/apis'
 import {
   ContextMenu,
@@ -8,16 +9,15 @@ import {
   type MenuOptions,
 } from '@imengyu/vue3-context-menu'
 import { useUserStore } from '@/stores/user'
-import { useCachedStore } from '@/stores/cached'
-import { copyToClip } from '@/utils/copy'
+import { copyToClip, handleCopyImg } from '@/utils/copy'
 import { useChatStore } from '@/stores/chat'
 import type { MessageType } from '@/services/types'
 import { MsgEnum, PowerEnum } from '@/enums'
-import type { CacheUserItem } from '@/services/types'
+import { useEmojiStore } from '@/stores/emoji'
+import { useEmojiUpload } from '@/hooks/useEmojiUpload'
+import { urlToFile } from '@/utils'
 
-const focusMsgInput = inject<() => void>('focusMsgInput')
-const onSelectPerson =
-  inject<(personItem: CacheUserItem, ignoreContentCheck?: boolean) => void>('onSelectPerson')
+const onAtUser = inject<(uid: number, ignore: boolean) => void>('onSelectPerson')
 
 const props = defineProps({
   // 消息体
@@ -31,9 +31,10 @@ const props = defineProps({
   },
 })
 
+const emojiStore = useEmojiStore()
+const { uploadEmoji } = useEmojiUpload()
 const userInfo = useUserStore()?.userInfo
 const chatStore = useChatStore()
-const cachedStore = useCachedStore()
 // FIXME 未登录到登录这些监听没有变化。需处理
 const isCurrentUser = computed(() => props.msg?.fromUser.uid === userInfo.uid)
 const isAdmin = computed(() => userInfo?.power === PowerEnum.ADMIN)
@@ -57,8 +58,16 @@ const onBlockUser = async () => {
 
 // 拷贝内容-(此版本未针对不同Body体进行处理)
 const copyContent = () => {
-  const content = props.msg.message.body?.content
-  copyToClip(content)
+  const msg = props.msg.message
+  if (msg.type === MsgEnum.TEXT) {
+    const content = msg.body?.content
+    copyToClip(content)
+    ElMessage.success('复制成功~')
+  }
+  if (msg.type === MsgEnum.IMAGE) {
+    handleCopyImg(msg.body.url)
+    ElMessage.success('复制成功~')
+  }
 }
 
 // 下载
@@ -73,18 +82,18 @@ const download = () => {
   a.remove()
 }
 
-const onDelete = () => chatStore.deleteMsg(props.msg.message.id)
-
-// @ 用户
-const onAtUser = () => {
-  // 输入框获取焦点
-  focusMsgInput?.()
-  // 插入内容
-  setTimeout(() => {
-    const userItem = cachedStore.userCachedList[props.msg.fromUser.uid]
-    userItem && onSelectPerson?.(userItem as CacheUserItem, true)
-  }, 10)
+const onAddEmoji = () => {
+  const { type, body } = props.msg.message
+  if (type === MsgEnum.EMOJI) {
+    emojiStore.addEmoji(body.url)
+  } else {
+    urlToFile(body.url).then((file) => {
+      uploadEmoji(file)
+    })
+  }
 }
+
+const onDelete = () => chatStore.deleteMsg(props.msg.message.id)
 </script>
 
 <template>
@@ -96,12 +105,29 @@ const onAtUser = () => {
       ...props.options,
     }"
   >
-    <ContextMenuItem label="at" @click="onAtUser" v-login-show>
+    <ContextMenuItem label="艾特Ta" @click="onAtUser?.(msg.fromUser.uid, true)" v-login-show>
       <template #icon> <span class="icon">@</span> </template>
     </ContextMenuItem>
-    <ContextMenuItem v-if="msg.message.type === MsgEnum.TEXT" label="复制" @click="copyContent">
+    <ContextMenuItem
+      v-if="msg.message.type === MsgEnum.TEXT || msg.message.type === MsgEnum.IMAGE"
+      label="复制"
+      @click="copyContent"
+    >
       <template #icon>
         <Icon icon="copy" :size="13" />
+      </template>
+    </ContextMenuItem>
+    <ContextMenuItem
+      v-if="
+        (msg.message.type === MsgEnum.EMOJI || msg.message.type === MsgEnum.IMAGE) &&
+        !isCurrentUser &&
+        emojiStore.emojiList.length < 50
+      "
+      label="添加到表情"
+      @click="onAddEmoji"
+    >
+      <template #icon>
+        <Icon icon="aixin" :size="13" />
       </template>
     </ContextMenuItem>
     <ContextMenuItem

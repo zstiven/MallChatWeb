@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 艾特功能参考自 https://github.com/MrHGJ/at-mentions
-import { ref, reactive, toRefs, watch, watchEffect, type StyleValue } from 'vue'
+import { ref, reactive, toRefs, watch, watchEffect, type StyleValue, inject } from 'vue'
 import type { IMention, INode } from './types'
 import type { CacheUserItem } from '@/services/types'
 import { NodeType } from './types'
@@ -14,6 +14,7 @@ import {
 import { useCachedStore } from '@/stores/cached'
 import VirtualList from '@/components/VirtualList'
 import MentionItem from './item.vue'
+import PasteImageDialog from '../PasteImageDialog/index.vue'
 
 // 关闭透传 attrs 到组件根节点，传递到子节点  v-bind="$attrs"
 defineOptions({ inheritAttrs: false })
@@ -53,6 +54,7 @@ const emit = defineEmits([
   'send',
 ])
 
+const focusMsgInput = inject<() => void>('focusMsgInput')
 const { modelValue: value, mentions, maxLength, disabled } = toRefs(props)
 const editorRef = ref<HTMLElement | null>()
 const scrollRef = ref()
@@ -292,7 +294,7 @@ const insertHtmlAtCaret = (
 }
 
 // 选择@的人。替换原来的检索文案，并插入新的@标签<button/>
-const onSelectPerson = (personItem: CacheUserItem, ignore = false) => {
+const selectPerson = (personItem: CacheUserItem, ignore = false) => {
   // 选择人员后关闭并重置选人框，重置搜索词
   showDialog.value = false
   // 滚动到候选框顶部
@@ -352,7 +354,6 @@ const onInputKeyUp = (e: KeyboardEvent) => {
 
 const handleArrow = (direction: 'up' | 'down') => {
   if (!scrollRef.value) return
-  console.log(scrollRef.value.getOffset(), scrollRef.value.getClientSize())
 
   let newIndex = 0
   if (direction === 'up') {
@@ -396,7 +397,7 @@ const onInputKeyDown = (e: KeyboardEvent) => {
     if (e.key === 'Enter') {
       e.preventDefault()
       // 选择当前人
-      onSelectPerson(personList.value[activeIndex.value])
+      selectPerson(personList.value[activeIndex.value])
       // 更新输入框同步值
       onInputText()
     }
@@ -410,6 +411,10 @@ const onInputKeyDown = (e: KeyboardEvent) => {
       e.preventDefault()
       onWrap()
       return
+    }
+    // 处理输入法状态下的回车事件
+    if ((e as KeyboardEvent).isComposing) {
+      return e.preventDefault()
     }
     // 禁止默认换行
     if (e.key === 'Enter') {
@@ -501,8 +506,20 @@ const onPaste = (e: ClipboardEvent) => {
   return false
 }
 
+//
+const onSelectPerson = (uid: number, ignore = false) => {
+  if (!uid) return
+  focusMsgInput?.()
+  setTimeout(() => {
+    const userItem = cachedStore.userCachedList[uid]
+    userItem && selectPerson?.(userItem as CacheUserItem, ignore)
+  }, 10)
+}
+
 // 暴露 ref 属性
 defineExpose({ input: editorRef, range: editorRange, onSelectPerson })
+
+const getKey = (item: CacheUserItem) => item.uid
 </script>
 
 <template>
@@ -536,13 +553,15 @@ defineExpose({ input: editorRef, range: editorRange, onSelectPerson })
         ref="scrollRef"
         class="person-warpper"
         dataPropName="item"
-        :itemProps="{ activeIndex }"
+        :itemProps="{ activeIndex, onSelect: onSelectPerson }"
         :data="personList"
-        data-key="uid"
+        :data-key="getKey"
         :item="MentionItem"
         :size="20"
       />
     </div>
+
+    <PasteImageDialog />
   </div>
 </template>
 

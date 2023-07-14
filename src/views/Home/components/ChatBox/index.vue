@@ -10,16 +10,18 @@ import { insertInputText } from './MsgInput/utils'
 import apis from '@/services/apis'
 import { judgeClient } from '@/utils/detectDevice'
 import { emojis } from './constant'
+import { useEmojiStore } from '@/stores/emoji'
 
 import type { IMention } from './MsgInput/types'
-import type { CacheUserItem } from '@/services/types'
 import { useFileDialog } from '@vueuse/core'
 import { useUpload } from '@/hooks/useUpload'
+import { useEmojiUpload } from '@/hooks/useEmojiUpload'
 import { useRecording } from '@/hooks/useRecording'
 import { MsgEnum } from '@/enums'
 import { useMockMessage } from '@/hooks/useMockMessage'
 import { generateBody } from '@/utils'
 import { ElMessage } from 'element-plus'
+import throttle from 'lodash/throttle'
 
 const client = judgeClient()
 
@@ -30,31 +32,36 @@ const chatStore = useChatStore()
 const isSelect = ref(false)
 const isSending = ref(false)
 const inputMsg = ref('')
-const msg_input_ref = ref<typeof ElInput>()
+const mentionRef = ref<typeof ElInput>()
 const mentionList = ref<IMention[]>([])
 const isAudio = ref(false)
 const isHovered = ref(false)
 const tempMessageId = ref(0)
 const showEmoji = ref(false)
 const nowMsgType = ref<MsgEnum>(MsgEnum.FILE)
+const panelIndex = ref(0)
+const isUpEmoji = ref(false)
+const tempEmojiId = ref(-1)
 
 const focusMsgInput = () => {
   setTimeout(() => {
-    if (!msg_input_ref.value) return
-    msg_input_ref.value?.focus?.()
-    const selection = msg_input_ref.value?.range?.selection as Selection
-    selection?.selectAllChildren(msg_input_ref.value.input)
+    if (!mentionRef.value) return
+    mentionRef.value?.focus?.()
+    const selection = mentionRef.value?.range?.selection as Selection
+    selection?.selectAllChildren(mentionRef.value.input)
     selection?.collapseToEnd()
   })
 }
-
-const onSelectPerson = (personItem: CacheUserItem, ignoreContentCheck?: boolean) => {
-  msg_input_ref.value?.onSelectPerson?.(personItem, ignoreContentCheck)
+// 艾特
+const onSelectPerson = (uid: number, ignoreCheck?: boolean) => {
+  mentionRef.value?.onSelectPerson?.(uid, ignoreCheck)
+  isAudio.value = false
 }
 
 provide('focusMsgInput', focusMsgInput)
 provide('onSelectPerson', onSelectPerson)
 
+// 发送消息
 const send = (msgType: MsgEnum, body: any, roomId = 1) => {
   apis
     .sendMsg({ roomId, msgType, body })
@@ -76,11 +83,7 @@ const send = (msgType: MsgEnum, body: any, roomId = 1) => {
     })
 }
 
-const sendMsgHandler = (e: Event) => {
-  // 处理输入法状态下的回车事件
-  if ((e as KeyboardEvent).isComposing) {
-    return e.preventDefault()
-  }
+const sendMsgHandler = () => {
   // 空消息或正在发送时禁止发送
   if (!inputMsg.value?.trim().length || isSending.value) {
     return
@@ -96,10 +99,12 @@ const sendMsgHandler = (e: Event) => {
 
 const loginStore = useWsLoginStore() // 显示登录框
 const userStore = useUserStore() // 是否已登录
+const emojiStore = useEmojiStore()
 const isSign = computed(() => userStore.isSign)
 const currentMsgReply = computed(() => (userStore.isSign && chatStore.currentMsgReply) || {})
 const currentReplUid = computed(() => currentMsgReply?.value.fromUser?.uid as number)
 const currentReplyUser = useUserInfo(currentReplUid)
+const emojiList = computed(() => emojiStore.emojiList)
 
 // 计算展示的回复消息的内容
 const showReplyContent = () => {
@@ -127,8 +132,8 @@ const showReplyContent = () => {
 const onClearReply = () => (chatStore.currentMsgReply = {})
 // 插入表情
 const insertEmoji = (emoji: string) => {
-  const input = msg_input_ref.value?.input
-  const editRange = msg_input_ref.value?.range as {
+  const input = mentionRef.value?.input
+  const editRange = mentionRef.value?.range as {
     range: Range
     selection: Selection
   }
@@ -149,10 +154,11 @@ const options = reactive({ multiple: false, accept: '.jpg,.png' })
 
 const { open, reset, onChange } = useFileDialog(options)
 const { isUploading, fileInfo, uploadFile, onStart, onChange: useUploadChange } = useUpload()
+const { uploadEmoji, isEmojiUp } = useEmojiUpload()
 const { isRecording, start, stop, onEnd, second } = useRecording()
 const { mockMessage } = useMockMessage()
 
-const openFileSelect = (fileType: string) => {
+const openFileSelect = (fileType: string, isEmoji = false) => {
   if (fileType === 'img') {
     nowMsgType.value = MsgEnum.IMAGE
     options.accept = '.jpg,.png,.gif,.jpeg,.webp'
@@ -161,10 +167,11 @@ const openFileSelect = (fileType: string) => {
     nowMsgType.value = MsgEnum.FILE
     options.accept = '*' // 任意文件
   }
+  isUpEmoji.value = isEmoji
   open()
 }
 
-onChange((files) => {
+const selectAndUploadFile = async (files?: FileList | null) => {
   if (!files?.length) return
   const file = files[0]
   if (nowMsgType.value === MsgEnum.IMAGE) {
@@ -172,8 +179,21 @@ onChange((files) => {
       return ElMessage.error('请选择图片文件')
     }
   }
-  uploadFile(file)
+  if (isUpEmoji.value) {
+    await uploadEmoji(file)
+  } else {
+    await uploadFile(file)
+  }
+}
+
+// 选中文件上传并发送消息
+provide('onChangeFile', selectAndUploadFile)
+// 设置消息类型
+provide('onChangeMsgType', (msgType: MsgEnum) => {
+  nowMsgType.value = msgType
 })
+
+onChange(selectAndUploadFile)
 
 onStart(() => {
   if (!fileInfo.value) return
@@ -205,6 +225,16 @@ const onStartRecord = () => {
   nowMsgType.value = MsgEnum.VOICE
   start()
 }
+
+const handleRightClick = (event: Event, id: number) => {
+  event.preventDefault()
+  tempEmojiId.value = tempEmojiId.value === id ? -1 : id
+}
+
+const sendEmoji = throttle((url: string) => {
+  send(MsgEnum.EMOJI, { url })
+  showEmoji.value = false
+}, 1000)
 </script>
 
 <template>
@@ -241,7 +271,7 @@ const onStartRecord = () => {
               class="m-input"
               v-show="!isAudio"
               v-model="inputMsg"
-              ref="msg_input_ref"
+              ref="mentionRef"
               autofocus
               :tabindex="!isSign || isSending"
               :disabled="!isSign || isSending"
@@ -251,11 +281,13 @@ const onStartRecord = () => {
               @send="sendMsgHandler"
             />
             <el-popover
-              placement="top-end"
+              placement="top"
               effect="dark"
               title=""
               v-model:visible="showEmoji"
-              :width="client === 'PC' ? 418 : '95%'"
+              popper-class="emoji-warpper"
+              :show-arrow="false"
+              :width="client === 'PC' ? 385 : '95%'"
               trigger="click"
             >
               <template #reference>
@@ -264,18 +296,69 @@ const onStartRecord = () => {
                   <Icon v-else icon="happy1" :size="18" colorful />
                 </div>
               </template>
-              <ul class="emoji-list">
-                <li
-                  class="emoji-item"
-                  v-for="(emoji, $index) of emojis"
-                  :key="$index"
-                  v-login="() => insertEmoji(emoji)"
-                >
-                  {{ emoji }}
-                </li>
-              </ul>
+              <div class="emoji-panel">
+                <div v-show="panelIndex === 0" class="emoji-panel-content">
+                  <ul class="emoji-list">
+                    <li
+                      class="emoji-item"
+                      v-for="(emoji, $index) of emojis"
+                      :key="$index"
+                      v-login="() => insertEmoji(emoji)"
+                    >
+                      {{ emoji }}
+                    </li>
+                  </ul>
+                </div>
+                <div v-show="panelIndex === 1" class="emoji-panel-content">
+                  <div
+                    v-for="emoji in emojiList"
+                    :key="emoji.id"
+                    class="item"
+                    @click="sendEmoji(emoji.expressionUrl)"
+                    @contextmenu="handleRightClick($event, emoji.id)"
+                  >
+                    <img :src="emoji.expressionUrl" />
+                    <Icon
+                      v-if="emoji.id === tempEmojiId"
+                      icon="guanbi1"
+                      class="del"
+                      @click.stop="emojiStore.deleteEmoji(emoji.id)"
+                    />
+                  </div>
+                  <Icon
+                    v-if="emojiList.length < 50 && !isEmojiUp"
+                    class="cursor-pointer item-add"
+                    icon="tianjia"
+                    :size="30"
+                    @click="openFileSelect('img', true)"
+                  />
+                  <div v-else class="item-add">
+                    <Icon icon="loading" spin :size="30" />
+                  </div>
+                </div>
+                <div class="footer">
+                  <Icon
+                    :class="['cursor-pointer', 'footer-act', { active: panelIndex === 0 }]"
+                    icon="biaoqing"
+                    :size="18"
+                    @click="panelIndex = 0"
+                  />
+                  <Icon
+                    :class="['cursor-pointer', 'footer-act', { active: panelIndex === 1 }]"
+                    icon="aixin"
+                    :size="18"
+                    @click="panelIndex = 1"
+                  />
+                </div>
+              </div>
             </el-popover>
-            <Icon class="action" icon="at" :size="20" colorful />
+            <Icon
+              class="action"
+              icon="at"
+              :size="20"
+              colorful
+              @click="insertInputText({ content: '@', ...mentionRef?.range })"
+            />
             <Icon
               :class="['action', { disabled: isUploading }]"
               icon="tupian"
@@ -310,3 +393,13 @@ const onStartRecord = () => {
 </template>
 
 <style lang="scss" src="./styles.scss" scoped />
+
+<style lang="scss">
+.emoji-warpper {
+  padding: 4px !important;
+  padding-top: 8px !important;
+  color: var(--font-main) !important;
+  background-color: var(--background-wrapper) !important;
+  border: none !important;
+}
+</style>
