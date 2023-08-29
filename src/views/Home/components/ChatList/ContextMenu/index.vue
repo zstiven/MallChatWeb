@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, type PropType, inject } from 'vue'
+import { computed, inject } from 'vue'
 import { ElMessage } from 'element-plus'
 import apis from '@/services/apis'
 import {
@@ -19,17 +19,12 @@ import { urlToFile } from '@/utils'
 
 const onAtUser = inject<(uid: number, ignore: boolean) => void>('onSelectPerson')
 
-const props = defineProps({
+const props = defineProps<{
   // 消息体
-  msg: {
-    type: Object as PropType<MessageType>,
-    required: true,
-  },
+  msg: MessageType
   // 菜单设置-其它的参数透传
-  options: {
-    type: Object as PropType<MenuOptions>,
-  },
-})
+  options?: MenuOptions
+}>()
 
 const emojiStore = useEmojiStore()
 const { uploadEmoji } = useEmojiUpload()
@@ -75,11 +70,25 @@ const download = () => {
   const { body } = props.msg.message
   const url = body?.url
   if (!url) return
-  const a = document.createElement('a')
-  a.href = url
-  a.download = body.fileName || '未知文件'
-  a.click()
-  a.remove()
+
+  const xhr = new XMLHttpRequest()
+  xhr.open('GET', url, true)
+  xhr.responseType = 'blob'
+
+  xhr.onreadystatechange = () => {
+    // 下载失败提示
+    if (xhr.status != 200) return ElMessage.error('下载失败~')
+    if (xhr.readyState === 4 && xhr.status === 200) {
+      const blob = xhr.response
+      let link = document.createElement('a')
+      link.href = URL.createObjectURL(blob)
+      link.download = body.fileName || '未知文件'
+      link.dispatchEvent(new MouseEvent('click'))
+      link.remove()
+    }
+  }
+
+  xhr.send()
 }
 
 const onAddEmoji = () => {
@@ -150,7 +159,7 @@ const onDelete = () => chatStore.deleteMsg(props.msg.message.id)
         <Icon icon="xiazai" :size="15" />
       </template>
     </ContextMenuItem>
-    <ContextMenuSeparator />
+    <ContextMenuSeparator v-login-show />
     <ContextMenuItem label="删除" @click="onDelete" v-login-show>
       <template #icon>
         <Icon icon="shanchu" :size="13" />
